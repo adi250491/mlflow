@@ -20,136 +20,75 @@ depends_on = None
 def upgrade():
     """
     Migrate trace_info table from V2 to unified V3 schema.
-    Uses field mapping approach for cleaner schema.
+    Simple column renames and additions - no data transformation needed.
     """
+    connection = op.get_bind()
     
-    # Step 1: Add new V3 columns
-    op.add_column("trace_info", sa.Column("trace_id_new", sa.String(255), nullable=True))
-    op.add_column("trace_info", sa.Column("request_time", sa.BigInteger, nullable=True))
-    op.add_column("trace_info", sa.Column("execution_duration", sa.BigInteger, nullable=True))
-    op.add_column("trace_info", sa.Column("state", sa.String(50), nullable=True))
-    op.add_column("trace_info", sa.Column("trace_location_type", sa.String(50), nullable=True))
-    op.add_column("trace_info", sa.Column("trace_location_id", sa.String(255), nullable=True))
+    # Step 1: Add new V3-only columns  
     op.add_column("trace_info", sa.Column("request_preview", sa.Text, nullable=True))
     op.add_column("trace_info", sa.Column("response_preview", sa.Text, nullable=True))
     op.add_column("trace_info", sa.Column("client_request_id", sa.String(255), nullable=True))
     
-    # Step 2: Migrate existing V2 data to V3 format in batches
-    connection = op.get_bind()
-    batch_size = 1000
+    # Step 2: Populate client_request_id from existing request_id
+    connection.execute(
+        text("UPDATE trace_info SET client_request_id = request_id")
+    )
     
-    while True:
-        try:
-            # Try PostgreSQL/SQLite style first
-            result = connection.execute(
-                text(f"""
-                UPDATE trace_info SET 
-                    trace_id_new = 'tr-' || request_id,
-                    request_time = timestamp_ms,
-                    execution_duration = execution_time_ms,
-                    state = status,
-                    trace_location_type = 'experiment',
-                    trace_location_id = CAST(experiment_id AS TEXT),
-                    client_request_id = request_id
-                WHERE trace_id_new IS NULL 
-                LIMIT {batch_size}
-                """)
-            )
-        except Exception:
-            # Fallback to MySQL style CONCAT
-            result = connection.execute(
-                text(f"""
-                UPDATE trace_info SET 
-                    trace_id_new = CONCAT('tr-', request_id),
-                    request_time = timestamp_ms,
-                    execution_duration = execution_time_ms,
-                    state = status,
-                    trace_location_type = 'experiment',
-                    trace_location_id = CAST(experiment_id AS CHAR(255)),
-                    client_request_id = request_id
-                WHERE trace_id_new IS NULL 
-                LIMIT {batch_size}
-                """)
-            )
-        
-        if result.rowcount == 0:
-            break
-    
-    # Step 3: Make V3 columns non-nullable and set defaults
+    # Step 3: Rename columns (V2 -> V3 mapping)
     with op.batch_alter_table("trace_info") as batch_op:
-        batch_op.alter_column("trace_id_new", nullable=False)
-        batch_op.alter_column("request_time", nullable=False)
-        batch_op.alter_column("state", nullable=False)
-        batch_op.alter_column("trace_location_type", nullable=False, server_default="experiment")
-        batch_op.alter_column("trace_location_id", nullable=False)
+        # Rename V2 columns to V3 names, keeping same data
+        batch_op.alter_column("request_id", new_column_name="trace_id", type_=sa.String(255))
+        batch_op.alter_column("timestamp_ms", new_column_name="request_time")  
+        batch_op.alter_column("execution_time_ms", new_column_name="execution_duration")
+        batch_op.alter_column("status", new_column_name="state")
     
-    # Step 4: Drop old V2 columns and indexes
+    # Step 4: Update foreign key columns in related tables (simple renames)
+    with op.batch_alter_table("trace_tags") as batch_op:
+        batch_op.alter_column("request_id", new_column_name="trace_id", type_=sa.String(255))
+        
+    with op.batch_alter_table("trace_request_metadata") as batch_op:
+        batch_op.alter_column("request_id", new_column_name="trace_id", type_=sa.String(255))
+    
+    # Step 5: Update constraints and indexes
+    # Drop old constraints/indexes
     op.drop_constraint("trace_info_pk", "trace_info", type_="primary")
     op.drop_index("index_trace_info_experiment_id_timestamp_ms", "trace_info")
     
-    op.drop_column("trace_info", "request_id")
-    op.drop_column("trace_info", "timestamp_ms")
-    op.drop_column("trace_info", "execution_time_ms")
-    op.drop_column("trace_info", "status")
-    
-    # Step 5: Rename trace_id_new to trace_id
-    with op.batch_alter_table("trace_info") as batch_op:
-        batch_op.alter_column("trace_id_new", new_column_name="trace_id")
-    
-    # Step 6: Create new primary key and indexes
+    # Create new constraints/indexes with V3 column names
     op.create_primary_key("trace_info_pk", "trace_info", ["trace_id"])
     op.create_index("index_trace_info_experiment_id_request_time", "trace_info", ["experiment_id", "request_time"])
-    op.create_index("index_trace_info_trace_location", "trace_info", ["trace_location_type", "trace_location_id"])
 
 
 def downgrade():
     """
     Revert unified V3 schema back to V2 schema.
-    This is a destructive operation - V3-specific data will be lost.
+    Simple column renames - V3-specific data will be lost.
     """
-    # Step 1: Add back V2 columns
-    op.add_column("trace_info", sa.Column("request_id", sa.String(50), nullable=True))
-    op.add_column("trace_info", sa.Column("timestamp_ms", sa.BigInteger, nullable=True))
-    op.add_column("trace_info", sa.Column("execution_time_ms", sa.BigInteger, nullable=True))
-    op.add_column("trace_info", sa.Column("status", sa.String(50), nullable=True))
     
-    # Step 2: Migrate V3 data back to V2 format
-    connection = op.get_bind()
-    connection.execute(
-        text("""
-        UPDATE trace_info SET 
-            request_id = CASE 
-                WHEN trace_id LIKE 'tr-%' THEN SUBSTR(trace_id, 4)
-                ELSE trace_id
-            END,
-            timestamp_ms = request_time,
-            execution_time_ms = execution_duration,
-            status = state
-        """)
-    )
-    
-    # Step 3: Make V2 columns non-nullable
-    with op.batch_alter_table("trace_info") as batch_op:
-        batch_op.alter_column("request_id", nullable=False)
-        batch_op.alter_column("timestamp_ms", nullable=False)
-        batch_op.alter_column("status", nullable=False)
-    
-    # Step 4: Drop V3 constraints and indexes
+    # Step 1: Drop V3 constraints and indexes
     op.drop_constraint("trace_info_pk", "trace_info", type_="primary")
-    op.drop_index("index_trace_info_trace_location", "trace_info")
     op.drop_index("index_trace_info_experiment_id_request_time", "trace_info")
     
-    # Step 5: Drop V3 columns
+    # Step 2: Rename columns back (V3 -> V2 mapping)
+    with op.batch_alter_table("trace_info") as batch_op:
+        # Rename V3 columns back to V2 names
+        batch_op.alter_column("trace_id", new_column_name="request_id", type_=sa.String(50))
+        batch_op.alter_column("request_time", new_column_name="timestamp_ms")
+        batch_op.alter_column("execution_duration", new_column_name="execution_time_ms")
+        batch_op.alter_column("state", new_column_name="status")
+    
+    # Step 3: Rename foreign key columns in related tables
+    with op.batch_alter_table("trace_tags") as batch_op:
+        batch_op.alter_column("trace_id", new_column_name="request_id", type_=sa.String(50))
+        
+    with op.batch_alter_table("trace_request_metadata") as batch_op:
+        batch_op.alter_column("trace_id", new_column_name="request_id", type_=sa.String(50))
+    
+    # Step 4: Drop V3-only columns
     op.drop_column("trace_info", "client_request_id")
     op.drop_column("trace_info", "response_preview")
     op.drop_column("trace_info", "request_preview")
-    op.drop_column("trace_info", "trace_location_id")
-    op.drop_column("trace_info", "trace_location_type")
-    op.drop_column("trace_info", "state")
-    op.drop_column("trace_info", "execution_duration")
-    op.drop_column("trace_info", "request_time")
-    op.drop_column("trace_info", "trace_id")
     
-    # Step 6: Restore V2 primary key and indexes
+    # Step 5: Restore V2 primary key and indexes
     op.create_primary_key("trace_info_pk", "trace_info", ["request_id"])
     op.create_index("index_trace_info_experiment_id_timestamp_ms", "trace_info", ["experiment_id", "timestamp_ms"])

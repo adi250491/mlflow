@@ -683,17 +683,6 @@ class SqlTraceInfo(Base):
     - V3 traces: state from TraceInfo
     - V2 traces: status (migrated)
     """
-    trace_location_type = Column(String(50), nullable=False, default="experiment")
-    """
-    Type of trace location (e.g., 'experiment', 'inference_table').
-    Default: 'experiment' for backward compatibility.
-    """
-    trace_location_id = Column(String(255), nullable=False)
-    """
-    ID of the trace location.
-    - For experiments: string representation of experiment_id
-    - For inference tables: table_name
-    """
     request_preview = Column(Text, nullable=True)
     """
     Preview of the trace request for UI display (V3 only).
@@ -736,8 +725,6 @@ class SqlTraceInfo(Base):
         PrimaryKeyConstraint("trace_id", name="trace_info_pk"),
         # Most frequent query: get all traces in an experiment sorted by request_time desc
         Index(f"index_{__tablename__}_experiment_id_request_time", "experiment_id", "request_time"),
-        # V3 queries by trace_location
-        Index(f"index_{__tablename__}_trace_location", "trace_location_type", "trace_location_id"),
     )
 
     def to_mlflow_entity(self, return_v3=None):
@@ -752,19 +739,19 @@ class SqlTraceInfo(Base):
             :py:class:`mlflow.entities.TraceInfo` or :py:class:`mlflow.entities.TraceInfoV2` object.
         """
         # Auto-detect format if not specified
-        # V3 traces have preview fields or non-experiment trace locations
+        # V3 traces have preview fields
         if return_v3 is None:
             return_v3 = (
                 self.request_preview is not None or 
-                self.response_preview is not None or
-                self.trace_location_type != "experiment"
+                self.response_preview is not None
             )
         
         if return_v3:
             # Return V3 TraceInfo
+            # OSS only supports experiment locations
             trace_location = TraceLocation(
-                location_type=self.trace_location_type,
-                location_id=self.trace_location_id,
+                location_type="experiment",
+                location_id=str(self.experiment_id),
             )
             
             return TraceInfo(
@@ -803,11 +790,11 @@ class SqlTraceTag(Base):
     """
     Value associated with tag: `String` (limit 250 characters). Could be *null*.
     """
-    request_id = Column(
-        String(50), ForeignKey("trace_info.request_id", ondelete="CASCADE"), nullable=False
+    trace_id = Column(
+        String(255), ForeignKey("trace_info.trace_id", ondelete="CASCADE"), nullable=False
     )
     """
-    Request ID to which this tag belongs: *Foreign Key* into ``trace_info`` table.
+    Trace ID to which this tag belongs: *Foreign Key* into ``trace_info`` table.
     """
     trace_info = relationship("SqlTraceInfo", backref=backref("tags", cascade="all"))
     """
@@ -815,10 +802,10 @@ class SqlTraceTag(Base):
     :py:class:`mlflow.store.dbmodels.models.SqlTraceInfo`.
     """
 
-    # Key is unique within a request_id
+    # Key is unique within a trace_id
     __table_args__ = (
-        PrimaryKeyConstraint("request_id", "key", name="trace_tag_pk"),
-        Index(f"index_{__tablename__}_request_id"),
+        PrimaryKeyConstraint("trace_id", "key", name="trace_tag_pk"),
+        Index(f"index_{__tablename__}_trace_id"),
     )
 
 
@@ -833,11 +820,11 @@ class SqlTraceRequestMetadata(Base):
     """
     Value associated with metadata: `String` (limit 250 characters). Could be *null*.
     """
-    request_id = Column(
-        String(50), ForeignKey("trace_info.request_id", ondelete="CASCADE"), nullable=False
+    trace_id = Column(
+        String(255), ForeignKey("trace_info.trace_id", ondelete="CASCADE"), nullable=False
     )
     """
-    Request ID to which this metadata belongs: *Foreign Key* into ``trace_info`` table.
+    Trace ID to which this metadata belongs: *Foreign Key* into ``trace_info`` table.
     """
     trace_info = relationship("SqlTraceInfo", backref=backref("request_metadata", cascade="all"))
     """
@@ -845,10 +832,10 @@ class SqlTraceRequestMetadata(Base):
     :py:class:`mlflow.store.dbmodels.models.SqlTraceInfo`.
     """
 
-    # Key is unique within a request_id
+    # Key is unique within a trace_id
     __table_args__ = (
-        PrimaryKeyConstraint("request_id", "key", name="trace_request_metadata_pk"),
-        Index(f"index_{__tablename__}_request_id"),
+        PrimaryKeyConstraint("trace_id", "key", name="trace_request_metadata_pk"),
+        Index(f"index_{__tablename__}_trace_id"),
     )
 
 
