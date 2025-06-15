@@ -12,7 +12,7 @@ from sqlalchemy import text
 
 # revision identifiers, used by Alembic.
 revision = "cbc13b556ace"
-down_revision = "5b0e9adcef9c"
+down_revision = "6953534de441"
 branch_labels = None
 depends_on = None
 
@@ -49,14 +49,15 @@ def upgrade():
     with op.batch_alter_table("trace_request_metadata") as batch_op:
         batch_op.alter_column("request_id", new_column_name="trace_id", type_=sa.String(255))
     
-    # Step 5: Update constraints and indexes
-    # Drop old constraints/indexes
-    op.drop_constraint("trace_info_pk", "trace_info", type_="primary")
-    op.drop_index("index_trace_info_experiment_id_timestamp_ms", "trace_info")
-    
-    # Create new constraints/indexes with V3 column names
-    op.create_primary_key("trace_info_pk", "trace_info", ["trace_id"])
-    op.create_index("index_trace_info_experiment_id_request_time", "trace_info", ["experiment_id", "request_time"])
+    # Step 5: Update constraints and indexes using batch mode for SQLite compatibility
+    with op.batch_alter_table("trace_info") as batch_op:
+        # Drop old constraints/indexes
+        batch_op.drop_constraint("trace_info_pk", type_="primary")
+        batch_op.drop_index("index_trace_info_experiment_id_timestamp_ms")
+        
+        # Create new constraints/indexes with V3 column names
+        batch_op.create_primary_key("trace_info_pk", ["trace_id"])
+        batch_op.create_index("index_trace_info_experiment_id_request_time", ["experiment_id", "request_time"])
 
 
 def downgrade():
@@ -65,9 +66,10 @@ def downgrade():
     Simple column renames - V3-specific data will be lost.
     """
     
-    # Step 1: Drop V3 constraints and indexes
-    op.drop_constraint("trace_info_pk", "trace_info", type_="primary")
-    op.drop_index("index_trace_info_experiment_id_request_time", "trace_info")
+    # Step 1: Drop V3 constraints and indexes using batch mode
+    with op.batch_alter_table("trace_info") as batch_op:
+        batch_op.drop_constraint("trace_info_pk", type_="primary")
+        batch_op.drop_index("index_trace_info_experiment_id_request_time")
     
     # Step 2: Rename columns back (V3 -> V2 mapping)
     with op.batch_alter_table("trace_info") as batch_op:
@@ -89,6 +91,7 @@ def downgrade():
     op.drop_column("trace_info", "response_preview")
     op.drop_column("trace_info", "request_preview")
     
-    # Step 5: Restore V2 primary key and indexes
-    op.create_primary_key("trace_info_pk", "trace_info", ["request_id"])
-    op.create_index("index_trace_info_experiment_id_timestamp_ms", "trace_info", ["experiment_id", "timestamp_ms"])
+    # Step 5: Restore V2 primary key and indexes using batch mode  
+    with op.batch_alter_table("trace_info") as batch_op:
+        batch_op.create_primary_key("trace_info_pk", ["request_id"])
+        batch_op.create_index("index_trace_info_experiment_id_timestamp_ms", ["experiment_id", "timestamp_ms"])
